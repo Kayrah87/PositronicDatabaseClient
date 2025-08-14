@@ -1,0 +1,187 @@
+version: '3.8'
+
+services:
+  # Laravel Application
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: "${APP_SERVICE:-positronic-app}"
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - .:/app
+      - "${DATA_STORAGE_PATH:-~/.positronic/data}/app:/app/storage"
+      - php_session:/tmp
+    networks:
+      - positronic-network
+      - external-network
+    environment:
+      - APP_ENV=${APP_ENV:-local}
+      - APP_KEY=${APP_KEY}
+      - DB_HOST=${DB_HOST:-positronic-mysql}
+      - DB_PORT=${DB_PORT:-3306}
+      - DB_DATABASE=${DB_DATABASE:-positronic_db}
+      - DB_USERNAME=${DB_USERNAME:-positronic_user}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - CACHE_STORE=${CACHE_STORE:-redis}
+      - REDIS_HOST=redis
+      - QUEUE_CONNECTION=${QUEUE_CONNECTION:-redis}
+    depends_on:
+      - mysql
+      - redis
+
+  # Nginx Web Server
+  nginx:
+    image: nginx:alpine
+    container_name: "${NGINX_SERVICE:-positronic-nginx}"
+    restart: unless-stopped
+    ports:
+      - "${NGINX_HTTP_PORT:-8098}:80"
+      - "${NGINX_HTTPS_PORT:-8099}:443"
+    volumes:
+      - .:/app
+      - ./docker/nginx/nginx.conf:/etc/nginx/conf.d/default.conf
+      - "${DATA_STORAGE_PATH:-~/.positronic/data}/nginx/logs:/var/log/nginx"
+      - ./docker/ssl:/etc/ssl
+    networks:
+      - positronic-network
+      - external-network
+    depends_on:
+      - app
+
+  # MySQL Database
+  mysql:
+    image: mysql:8.0
+    container_name: "${MYSQL_SERVICE:-positronic-mysql}"
+    restart: unless-stopped
+    ports:
+      - "${MYSQL_HOST_PORT:-3309}:${MYSQL_CONTAINER_PORT:-3306}"
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_password}
+      MYSQL_DATABASE: ${DB_DATABASE:-positronic_db}
+      MYSQL_USER: ${DB_USERNAME:-positronic_user}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-secure_password}
+    volumes:
+      - "${DATA_STORAGE_PATH:-~/.positronic/data}/mysql:/var/lib/mysql"
+      - ./docker/mysql/my.cnf:/etc/mysql/conf.d/custom.cnf
+    command: --default-authentication-plugin=mysql_native_password
+    networks:
+      - positronic-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 5s
+      retries: 10
+      interval: 10s
+
+  # Redis Cache & Queue
+  redis:
+    image: redis:7-alpine
+    container_name: positronic-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - "${DATA_STORAGE_PATH:-~/.positronic/data}/redis:/data"
+    networks:
+      - positronic-network
+    command: redis-server --appendonly yes
+
+  # Laravel Queue Worker
+  queue:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: positronic-queue
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - .:/app
+      - "${DATA_STORAGE_PATH:-~/.positronic/data}/app:/app/storage"
+    networks:
+      - positronic-network
+    environment:
+      - APP_ENV=${APP_ENV:-local}
+      - APP_KEY=${APP_KEY}
+      - DB_HOST=${DB_HOST:-positronic-mysql}
+      - DB_PORT=${DB_PORT:-3306}
+      - DB_DATABASE=${DB_DATABASE:-positronic_db}
+      - DB_USERNAME=${DB_USERNAME:-positronic_user}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - REDIS_HOST=redis
+      - QUEUE_CONNECTION=${QUEUE_CONNECTION:-redis}
+    depends_on:
+      - mysql
+      - redis
+    command: ["php", "artisan", "queue:work", "--verbose", "--tries=3", "--timeout=90"]
+
+  # Laravel Scheduler
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: positronic-scheduler
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - .:/app
+      - "${DATA_STORAGE_PATH:-~/.positronic/data}/app:/app/storage"
+    networks:
+      - positronic-network
+    environment:
+      - APP_ENV=${APP_ENV:-local}
+      - APP_KEY=${APP_KEY}
+      - DB_HOST=${DB_HOST:-positronic-mysql}
+      - DB_PORT=${DB_PORT:-3306}
+      - DB_DATABASE=${DB_DATABASE:-positronic_db}
+      - DB_USERNAME=${DB_USERNAME:-positronic_user}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - REDIS_HOST=redis
+    depends_on:
+      - mysql
+      - redis
+    command: ["php", "artisan", "schedule:work"]
+
+  # Laravel Horizon (Queue Dashboard)
+  horizon:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: positronic-horizon
+    restart: unless-stopped
+    working_dir: /app
+    ports:
+      - "${HORIZON_PORT:-8100}:8080"
+    volumes:
+      - .:/app
+      - "${DATA_STORAGE_PATH:-~/.positronic/data}/app:/app/storage"
+    networks:
+      - positronic-network
+    environment:
+      - APP_ENV=${APP_ENV:-local}
+      - APP_KEY=${APP_KEY}
+      - DB_HOST=${DB_HOST:-positronic-mysql}
+      - DB_PORT=${DB_PORT:-3306}
+      - DB_DATABASE=${DB_DATABASE:-positronic_db}
+      - DB_USERNAME=${DB_USERNAME:-positronic_user}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - REDIS_HOST=redis
+    depends_on:
+      - mysql
+      - redis
+    command: ["php", "artisan", "horizon"]
+
+volumes:
+  php_session:
+
+networks:
+  # Internal network for services communication
+  positronic-network:
+    driver: bridge
+    internal: false
+  
+  # External network for internet access and communication with other containers
+  external-network:
+    driver: bridge
+    external: true
+    name: bridge
